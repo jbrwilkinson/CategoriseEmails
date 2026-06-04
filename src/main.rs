@@ -1,8 +1,10 @@
 mod emlx;
+mod render;
 mod report;
 
 use clap::Parser;
 use emlx::Email;
+use render::{Renderer, text::TextRenderer};
 use report::{ReportBuilder, SIZE_BUCKET_ORDER};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -182,5 +184,5 @@ fn main() {
     }
 
     let report = build_report(&emails, parse_errors, &args.dirs, args.top_n, args.folders);
-    report.print();
+    TextRenderer.render(&report);
 }
