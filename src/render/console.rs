@@ -189,9 +189,8 @@ fn print_bar(label: &str, value: usize, max_value: usize, out: &mut dyn Write, l
     } else {
         0
     };
-    let bar: String = std::iter::repeat('█')
-        .take(filled)
-        .chain(std::iter::repeat('░').take(layout.bar_width - filled))
+    let bar: String = std::iter::repeat_n('█', filled)
+        .chain(std::iter::repeat_n('░', layout.bar_width - filled))
         .collect();
     writeln!(
         out,

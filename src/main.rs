@@ -135,9 +135,8 @@ impl Progress {
         } else {
             width
         };
-        let bar: String = std::iter::repeat('█')
-            .take(filled)
-            .chain(std::iter::repeat('░').take(width - filled))
+        let bar: String = std::iter::repeat_n('█', filled)
+            .chain(std::iter::repeat_n('░', width - filled))
             .collect();
         let pct = if total > 0 { done * 100 / total } else { 100 };
         // \r returns to column 0; no \n so the next call overwrites this line.
@@ -170,11 +169,10 @@ fn scan_dir(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for entry in WalkDir::new(dir).follow_links(true) {
         match entry {
-            Ok(e) if e.file_type().is_file() => {
-                if e.path().extension().and_then(|e| e.to_str()) == Some("emlx") {
+            Ok(e) if e.file_type().is_file()
+                && e.path().extension().and_then(|e| e.to_str()) == Some("emlx") => {
                     files.push(e.path().to_path_buf());
                 }
-            }
             Err(e) => eprintln!("Warning: {e}"),
             _ => {}
         }
@@ -332,16 +330,14 @@ fn main() {
                         email
                             .date
                             .map(|d| d.to_rfc2822())
-                            .unwrap_or_else(|| "(no date)".into())
+                            .unwrap_or_else(|| "(no date)".into()),
                     );
                 }
                 emails.push((path.clone(), email));
             }
             None => {
                 parse_errors += 1;
-                if args.verbose {
-                    eprintln!("Failed to parse: {}", path.display());
-                }
+                eprintln!("Failed to parse: {}", path.display());
             }
         }
     }

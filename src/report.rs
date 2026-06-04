@@ -35,6 +35,7 @@ pub struct Report {
 
     /// Emails per calendar year, sorted ascending.
     pub emails_by_year: Vec<(i32, usize)>,
+    /// Emails with no parseable Date header.
     pub emails_without_date: usize,
 
     /// Size-bucket distribution in canonical order (see `SIZE_BUCKET_ORDER`).
