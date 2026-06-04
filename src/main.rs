@@ -2,13 +2,22 @@ mod emlx;
 mod render;
 mod report;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use emlx::Email;
-use render::{Renderer, text::TextRenderer};
+use render::{Renderer, console::ConsoleRenderer, markdown::MarkdownRenderer};
 use report::{ReportBuilder, SIZE_BUCKET_ORDER};
 use std::collections::HashMap;
+use std::io;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+#[derive(Clone, ValueEnum)]
+enum Format {
+    /// Human-readable console output with bar charts
+    Console,
+    /// Markdown document with tables
+    Markdown,
+}
 
 #[derive(Parser)]
 #[command(name = "email-analyser")]
@@ -29,6 +38,10 @@ struct Args {
     /// Print one line per parsed email
     #[arg(short, long)]
     verbose: bool,
+
+    /// Output format
+    #[arg(long, value_enum, default_value = "console")]
+    format: Format,
 }
 
 fn find_emlx_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -147,9 +160,10 @@ fn build_report(
 fn main() {
     let args = Args::parse();
 
-    println!("Scanning for .emlx files...");
+    // Progress messages go to stderr so they don't corrupt non-text output formats.
+    eprintln!("Scanning for .emlx files...");
     let paths = find_emlx_files(&args.dirs);
-    println!("Found {} .emlx files\n", paths.len());
+    eprintln!("Found {} .emlx files\n", paths.len());
     if paths.is_empty() {
         return;
     }
@@ -161,7 +175,7 @@ fn main() {
         match emlx::parse_emlx(path) {
             Some(email) => {
                 if args.verbose {
-                    println!(
+                    eprintln!(
                         "[{}] From: {} | Subject: {} | Date: {}",
                         path.display(),
                         email.from,
@@ -184,5 +198,11 @@ fn main() {
     }
 
     let report = build_report(&emails, parse_errors, &args.dirs, args.top_n, args.folders);
-    TextRenderer.render(&report);
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    match args.format {
+        Format::Console => ConsoleRenderer.render(&report, &mut out),
+        Format::Markdown => MarkdownRenderer.render(&report, &mut out),
+    }
 }
