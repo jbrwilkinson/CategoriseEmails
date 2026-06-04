@@ -4,12 +4,18 @@ mod report;
 
 use clap::{Parser, ValueEnum};
 use emlx::Email;
-use render::{Renderer, console::ConsoleRenderer, markdown::MarkdownRenderer};
+use render::{
+    Renderer,
+    console::{ConsoleRenderer, MIN_TOTAL_WIDTH},
+    markdown::MarkdownRenderer,
+};
 use report::{ReportBuilder, SIZE_BUCKET_ORDER};
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+// ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, ValueEnum)]
 enum Format {
@@ -36,31 +42,164 @@ struct Args {
     folders: bool,
 
     /// Print one line per parsed email
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "progress")]
     verbose: bool,
+
+    /// Show scanning and parsing progress on stderr
+    #[arg(short, long, conflicts_with = "verbose")]
+    progress: bool,
 
     /// Output format
     #[arg(long, value_enum, default_value = "console")]
     format: Format,
+
+    /// Percentage of the terminal width to use for console output (5–100)
+    #[arg(long, default_value = "40", value_parser = clap::value_parser!(u8).range(5..=100))]
+    width: u8,
 }
 
-fn find_emlx_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
+// ── Terminal width ────────────────────────────────────────────────────────────
+
+/// Resolve the character width to use for output, given a percentage of the
+/// current terminal width. Falls back to 80 columns when the terminal size
+/// cannot be detected. The result is clamped to [`MIN_TOTAL_WIDTH`].
+fn resolve_width(percent: u8) -> usize {
+    use terminal_size::{Width, terminal_size};
+    let terminal_cols = terminal_size()
+        .map(|(Width(w), _)| w as usize)
+        .unwrap_or(80);
+    (terminal_cols * percent as usize / 100).max(MIN_TOTAL_WIDTH)
+}
+
+// ── Progress display ──────────────────────────────────────────────────────────
+
+const PROGRESS_MIN_BAR: usize = 5;
+
+/// Writes live scanning/parsing progress to stderr.
+///
+/// All output uses `\r` to overwrite the current line so the progress display
+/// collapses to a single line in the scrollback once parsing is complete.
+struct Progress {
+    enabled: bool,
+    total_width: usize,
+    stderr: io::Stderr,
+}
+
+impl Progress {
+    fn new(enabled: bool, total_width: usize) -> Self {
+        Self {
+            enabled,
+            total_width,
+            stderr: io::stderr(),
+        }
+    }
+
+    /// Compute the bar width for a given `total` file count.
+    ///
+    /// The fixed parts of the progress line are:
+    ///   `"  Parsing   ["` = 14, `"] "` = 2, `"100%  "` = 6, `"("` + `"/"` + `")"` = 3
+    /// plus two copies of `total`'s digit count for `done` and `total`,
+    /// plus 1 safety margin so the line never touches the terminal's right edge.
+    fn bar_width_for(&self, total: usize) -> usize {
+        let digits = total.to_string().len();
+        let overhead = 14 + 2 + 6 + 3 + 2 * digits + 1;
+        self.total_width
+            .saturating_sub(overhead)
+            .max(PROGRESS_MIN_BAR)
+    }
+
+    /// Print a folder name as scanning begins.
+    fn scanning_folder(&mut self, name: &str) {
+        if self.enabled {
+            eprintln!("  Scanning  {}", name);
+        }
+    }
+
+    /// Print the email count found in the most-recently-scanned folder.
+    fn folder_found(&mut self, name: &str, count: usize) {
+        if self.enabled {
+            eprintln!("  Found     {} — {} email(s)", name, count);
+        }
+    }
+
+    /// Overwrite the current line with a parsing progress bar.
+    ///
+    /// Call with `done == total` to mark completion (bar becomes full, line kept).
+    fn parsing(&mut self, done: usize, total: usize) {
+        if !self.enabled {
+            return;
+        }
+        let width = self.bar_width_for(total);
+        let filled = if total > 0 {
+            done * width / total
+        } else {
+            width
+        };
+        let bar: String = std::iter::repeat('█')
+            .take(filled)
+            .chain(std::iter::repeat('░').take(width - filled))
+            .collect();
+        let pct = if total > 0 { done * 100 / total } else { 100 };
+        // \r returns to column 0; no \n so the next call overwrites this line.
+        // On completion we print \n to leave the finished bar in the scrollback.
+        if done < total {
+            write!(
+                self.stderr,
+                "\r  Parsing   [{}] {:>3}%  ({}/{})",
+                bar, pct, done, total
+            )
+            .ok();
+            self.stderr.flush().ok();
+        } else {
+            eprintln!("\r  Parsing   [{}] {:>3}%  ({}/{})", bar, pct, done, total);
+        }
+    }
+
+    /// Print a blank separator line after the progress block.
+    fn done(&mut self) {
+        if self.enabled {
+            eprintln!();
+        }
+    }
+}
+
+// ── File discovery ────────────────────────────────────────────────────────────
+
+/// Scan a single directory tree for `.emlx` files.
+fn scan_dir(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for dir in dirs {
-        for entry in WalkDir::new(dir).follow_links(true) {
-            match entry {
-                Ok(e) if e.file_type().is_file() => {
-                    if e.path().extension().and_then(|e| e.to_str()) == Some("emlx") {
-                        files.push(e.path().to_path_buf());
-                    }
+    for entry in WalkDir::new(dir).follow_links(true) {
+        match entry {
+            Ok(e) if e.file_type().is_file() => {
+                if e.path().extension().and_then(|e| e.to_str()) == Some("emlx") {
+                    files.push(e.path().to_path_buf());
                 }
-                Err(e) => eprintln!("Warning: {e}"),
-                _ => {}
             }
+            Err(e) => eprintln!("Warning: {e}"),
+            _ => {}
         }
     }
     files
 }
+
+/// Scan all directories, reporting per-folder progress when enabled.
+fn find_emlx_files(dirs: &[PathBuf], progress: &mut Progress) -> Vec<PathBuf> {
+    let mut all = Vec::new();
+    for dir in dirs {
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir.to_string_lossy().into_owned());
+
+        progress.scanning_folder(&name);
+        let found = scan_dir(dir);
+        progress.folder_found(&name, found.len());
+        all.extend(found);
+    }
+    all
+}
+
+// ── Aggregation ───────────────────────────────────────────────────────────────
 
 /// Return the command-line root directory name that contains `path`.
 fn folder_label(path: &Path, roots: &[PathBuf]) -> String {
@@ -97,7 +236,6 @@ fn build_report(
     let mut size_bucket_counts: HashMap<&'static str, usize> = HashMap::new();
     let mut folder_counts: HashMap<String, usize> = HashMap::new();
     let mut folder_sizes: HashMap<String, u64> = HashMap::new();
-
     let mut dated_timestamps: Vec<chrono::DateTime<chrono::FixedOffset>> = Vec::new();
 
     for (path, email) in emails {
@@ -157,21 +295,32 @@ fn build_report(
     .build()
 }
 
+// ── Entry point ───────────────────────────────────────────────────────────────
+
 fn main() {
     let args = Args::parse();
+    let total_width = resolve_width(args.width);
+    let mut progress = Progress::new(args.progress, total_width);
 
-    // Progress messages go to stderr so they don't corrupt non-text output formats.
-    eprintln!("Scanning for .emlx files...");
-    let paths = find_emlx_files(&args.dirs);
-    eprintln!("Found {} .emlx files\n", paths.len());
+    let paths = find_emlx_files(&args.dirs, &mut progress);
+
+    if args.progress {
+        eprintln!("  Total     {} email(s) found", paths.len());
+    }
+
     if paths.is_empty() {
         return;
     }
 
+    progress.done();
+
+    let total = paths.len();
     let mut emails: Vec<(PathBuf, Email)> = Vec::new();
     let mut parse_errors = 0usize;
 
-    for path in &paths {
+    for (i, path) in paths.iter().enumerate() {
+        progress.parsing(i, total);
+
         match emlx::parse_emlx(path) {
             Some(email) => {
                 if args.verbose {
@@ -197,12 +346,15 @@ fn main() {
         }
     }
 
+    progress.parsing(total, total); // draw completed bar
+    progress.done();
+
     let report = build_report(&emails, parse_errors, &args.dirs, args.top_n, args.folders);
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
     match args.format {
-        Format::Console => ConsoleRenderer.render(&report, &mut out),
+        Format::Console => ConsoleRenderer { total_width }.render(&report, &mut out),
         Format::Markdown => MarkdownRenderer.render(&report, &mut out),
     }
 }

@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use crate::render::Renderer;
+#[cfg_attr(not(test), allow(unused_imports))]
 use crate::report::{Report, SIZE_BUCKET_ORDER, format_size};
 
 const FOLDER_LIMIT: usize = 20;
