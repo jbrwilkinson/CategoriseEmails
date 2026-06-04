@@ -1,8 +1,9 @@
 mod emlx;
+mod report;
 
-use chrono::{DateTime, FixedOffset};
 use clap::Parser;
 use emlx::Email;
+use report::{ReportBuilder, SIZE_BUCKET_ORDER};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -46,118 +47,99 @@ fn find_emlx_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
     files
 }
 
+/// Return the command-line root directory name that contains `path`.
 fn folder_label(path: &Path, roots: &[PathBuf]) -> String {
     for root in roots {
-        if let Ok(rel) = path.strip_prefix(root) {
-            if let Some(parent) = rel.parent() {
-                let label = parent.to_string_lossy();
-                if !label.is_empty() {
-                    return label.into_owned();
-                }
-            }
+        if path.starts_with(root) {
+            return root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.to_string_lossy().into_owned());
         }
     }
-    path.parent()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "(unknown)".to_string())
+    "(unknown)".to_string()
 }
 
-fn print_bar(label: &str, value: usize, max_value: usize, bar_width: usize) {
-    let filled = if max_value > 0 {
-        value * bar_width / max_value
+fn build_report(
+    emails: &[(PathBuf, Email)],
+    parse_errors: usize,
+    dirs: &[PathBuf],
+    top_n: usize,
+    show_all_folders: bool,
+) -> report::Report {
+    let total_emails = emails.len();
+    let total_size_bytes: u64 = emails.iter().map(|(_, e)| e.size_bytes).sum();
+    let avg_size_bytes = if total_emails > 0 {
+        total_size_bytes / total_emails as u64
     } else {
         0
     };
-    let bar: String = std::iter::repeat('█')
-        .take(filled)
-        .chain(std::iter::repeat('░').take(bar_width - filled))
-        .collect();
-    println!("  {:<42} {} {:>6}", truncate(label, 42), bar, value);
-}
 
-fn truncate(s: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
-        s.to_string()
-    } else {
-        chars[..max_chars - 1].iter().collect::<String>() + "…"
-    }
-}
+    let mut sender_counts: HashMap<String, usize> = HashMap::new();
+    let mut sender_sizes: HashMap<String, u64> = HashMap::new();
+    let mut year_counts: HashMap<i32, usize> = HashMap::new();
+    let mut emails_without_date = 0usize;
+    let mut size_bucket_counts: HashMap<&'static str, usize> = HashMap::new();
+    let mut folder_counts: HashMap<String, usize> = HashMap::new();
+    let mut folder_sizes: HashMap<String, u64> = HashMap::new();
 
-fn format_size(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{} B", bytes)
-    }
-}
+    let mut dated_timestamps: Vec<chrono::DateTime<chrono::FixedOffset>> = Vec::new();
 
-struct Stats<'a> {
-    emails: &'a [Email],
-}
+    for (path, email) in emails {
+        *sender_counts.entry(email.from.clone()).or_default() += 1;
+        *sender_sizes.entry(email.from.clone()).or_default() += email.size_bytes;
 
-impl<'a> Stats<'a> {
-    fn sender_counts(&self) -> HashMap<&str, usize> {
-        let mut m = HashMap::new();
-        for e in self.emails {
-            *m.entry(e.from.as_str()).or_default() += 1;
-        }
-        m
-    }
-
-    fn sender_sizes(&self) -> HashMap<&str, u64> {
-        let mut m = HashMap::new();
-        for e in self.emails {
-            *m.entry(e.from.as_str()).or_default() += e.size_bytes;
-        }
-        m
-    }
-
-    fn year_counts(&self) -> (HashMap<i32, usize>, usize) {
-        let mut m = HashMap::new();
-        let mut no_date = 0;
-        for e in self.emails {
-            match e.date {
-                Some(d) => {
-                    *m.entry(d.format("%Y").to_string().parse::<i32>().unwrap_or(0))
-                        .or_default() += 1
-                }
-                None => no_date += 1,
+        match email.date {
+            Some(d) => {
+                let year = d.format("%Y").to_string().parse::<i32>().unwrap_or(0);
+                *year_counts.entry(year).or_default() += 1;
+                dated_timestamps.push(d);
             }
+            None => emails_without_date += 1,
         }
-        (m, no_date)
+
+        let bucket = match email.size_bytes {
+            0..=1_023 => SIZE_BUCKET_ORDER[0],
+            1_024..=9_999 => SIZE_BUCKET_ORDER[1],
+            10_000..=99_999 => SIZE_BUCKET_ORDER[2],
+            100_000..=999_999 => SIZE_BUCKET_ORDER[3],
+            1_000_000..=9_999_999 => SIZE_BUCKET_ORDER[4],
+            _ => SIZE_BUCKET_ORDER[5],
+        };
+        *size_bucket_counts.entry(bucket).or_default() += 1;
+
+        let folder = folder_label(path, dirs);
+        *folder_counts.entry(folder.clone()).or_default() += 1;
+        *folder_sizes.entry(folder).or_default() += email.size_bytes;
     }
 
-    fn size_buckets(&self) -> HashMap<&'static str, usize> {
-        let mut m: HashMap<&str, usize> = HashMap::new();
-        for e in self.emails {
-            let label = match e.size_bytes {
-                0..=1_023 => "< 1 KB",
-                1_024..=9_999 => "1–10 KB",
-                10_000..=99_999 => "10–100 KB",
-                100_000..=999_999 => "100 KB–1 MB",
-                1_000_000..=9_999_999 => "1–10 MB",
-                _ => "> 10 MB",
-            };
-            *m.entry(label).or_default() += 1;
-        }
-        m
-    }
+    dated_timestamps.sort();
+    let date_range = match (dated_timestamps.first(), dated_timestamps.last()) {
+        (Some(earliest), Some(latest)) => Some((
+            earliest.format("%Y-%m-%d").to_string(),
+            latest.format("%Y-%m-%d").to_string(),
+        )),
+        _ => None,
+    };
 
-    fn total_size(&self) -> u64 {
-        self.emails.iter().map(|e| e.size_bytes).sum()
+    ReportBuilder {
+        total_emails,
+        parse_errors,
+        total_size_bytes,
+        avg_size_bytes,
+        date_range,
+        sender_counts,
+        sender_sizes,
+        year_counts,
+        emails_without_date,
+        size_bucket_counts,
+        folder_counts,
+        folder_sizes,
+        top_senders_limit: top_n,
+        show_all_folders,
+        include_folders: dirs.len() > 1,
     }
-
-    fn date_range(&self) -> (Option<DateTime<FixedOffset>>, Option<DateTime<FixedOffset>>) {
-        let mut dated: Vec<DateTime<FixedOffset>> =
-            self.emails.iter().filter_map(|e| e.date).collect();
-        dated.sort();
-        (dated.first().cloned(), dated.last().cloned())
-    }
+    .build()
 }
 
 fn main() {
@@ -199,124 +181,6 @@ fn main() {
         }
     }
 
-    // Folder stats (needs path alongside email)
-    let mut folder_counts: HashMap<String, usize> = HashMap::new();
-    let mut folder_sizes: HashMap<String, u64> = HashMap::new();
-    for (path, email) in &emails {
-        let folder = folder_label(path, &args.dirs);
-        *folder_counts.entry(folder.clone()).or_default() += 1;
-        *folder_sizes.entry(folder).or_default() += email.size_bytes;
-    }
-
-    let email_slice: Vec<Email> = emails.into_iter().map(|(_, e)| e).collect();
-    let stats = Stats {
-        emails: &email_slice,
-    };
-
-    let total = email_slice.len();
-    let total_size = stats.total_size();
-    let avg_size = if total > 0 {
-        total_size / total as u64
-    } else {
-        0
-    };
-    let (earliest, latest) = stats.date_range();
-
-    println!("══════════════════════════════════════════════════════════════════════");
-    println!(" AGGREGATE STATISTICS");
-    println!("══════════════════════════════════════════════════════════════════════");
-    println!();
-    println!("  Total emails parsed : {}", total);
-    println!("  Parse errors        : {}", parse_errors);
-    println!("  Total size on disk  : {}", format_size(total_size));
-    println!("  Average size        : {}", format_size(avg_size));
-    if let (Some(e), Some(l)) = (earliest, latest) {
-        println!(
-            "  Date range          : {} → {}",
-            e.format("%Y-%m-%d"),
-            l.format("%Y-%m-%d")
-        );
-    }
-    println!();
-
-    let sender_counts = stats.sender_counts();
-    let sender_sizes = stats.sender_sizes();
-    println!("──────────────────────────────────────────────────────────────────────");
-    println!(" TOP {} SENDERS  (by message count)", args.top_n);
-    println!("──────────────────────────────────────────────────────────────────────");
-    let mut senders: Vec<(&str, usize)> = sender_counts.iter().map(|(&k, &v)| (k, v)).collect();
-    senders.sort_by(|a, b| b.1.cmp(&a.1));
-    let max_count = senders.first().map(|s| s.1).unwrap_or(1);
-    for (addr, count) in senders.iter().take(args.top_n) {
-        let size = sender_sizes.get(addr).copied().unwrap_or(0);
-        print_bar(
-            &format!("{} ({})", addr, format_size(size)),
-            *count,
-            max_count,
-            20,
-        );
-    }
-    println!();
-
-    let (year_counts, no_date_count) = stats.year_counts();
-    println!("──────────────────────────────────────────────────────────────────────");
-    println!(" EMAILS BY YEAR");
-    println!("──────────────────────────────────────────────────────────────────────");
-    let mut years: Vec<(i32, usize)> = year_counts.into_iter().collect();
-    years.sort_by_key(|(y, _)| *y);
-    let max_year = years.iter().map(|(_, c)| *c).max().unwrap_or(1);
-    for (year, count) in &years {
-        print_bar(&year.to_string(), *count, max_year, 20);
-    }
-    if no_date_count > 0 {
-        print_bar("(no date)", no_date_count, max_year, 20);
-    }
-    println!();
-
-    println!("──────────────────────────────────────────────────────────────────────");
-    println!(" SIZE DISTRIBUTION");
-    println!("──────────────────────────────────────────────────────────────────────");
-    let size_buckets = stats.size_buckets();
-    let bucket_order = [
-        "< 1 KB",
-        "1–10 KB",
-        "10–100 KB",
-        "100 KB–1 MB",
-        "1–10 MB",
-        "> 10 MB",
-    ];
-    let max_bucket = size_buckets.values().copied().max().unwrap_or(1);
-    for label in &bucket_order {
-        print_bar(
-            label,
-            size_buckets.get(*label).copied().unwrap_or(0),
-            max_bucket,
-            20,
-        );
-    }
-    println!();
-
-    println!("──────────────────────────────────────────────────────────────────────");
-    println!(" EMAILS BY FOLDER");
-    println!("──────────────────────────────────────────────────────────────────────");
-    let mut folders: Vec<(&String, usize)> = folder_counts.iter().map(|(k, &v)| (k, v)).collect();
-    folders.sort_by(|a, b| b.1.cmp(&a.1));
-    let max_folder = folders.first().map(|f| f.1).unwrap_or(1);
-    let limit = if args.folders { folders.len() } else { 20 };
-    for (folder, count) in folders.iter().take(limit) {
-        let size = folder_sizes.get(*folder).copied().unwrap_or(0);
-        print_bar(
-            &format!("{} ({})", folder, format_size(size)),
-            *count,
-            max_folder,
-            20,
-        );
-    }
-    if !args.folders && folder_counts.len() > 20 {
-        println!(
-            "  ... ({} more folders, use --folders to show all)",
-            folder_counts.len() - 20
-        );
-    }
-    println!();
+    let report = build_report(&emails, parse_errors, &args.dirs, args.top_n, args.folders);
+    report.print();
 }
