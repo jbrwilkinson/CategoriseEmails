@@ -56,6 +56,11 @@ struct Args {
     /// Percentage of the terminal width to use for console output (5–100)
     #[arg(long, default_value = "40", value_parser = clap::value_parser!(u8).range(5..=100))]
     width: u8,
+
+    /// Exclude emails whose sender address contains any of these words (case-insensitive).
+    /// May be given multiple times: --exclude noreply --exclude mailer
+    #[arg(long = "exclude", short = 'x', value_name = "WORD")]
+    exclude: Vec<String>,
 }
 
 // ── Terminal width ────────────────────────────────────────────────────────────
@@ -169,10 +174,12 @@ fn scan_dir(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for entry in WalkDir::new(dir).follow_links(true) {
         match entry {
-            Ok(e) if e.file_type().is_file()
-                && e.path().extension().and_then(|e| e.to_str()) == Some("emlx") => {
-                    files.push(e.path().to_path_buf());
-                }
+            Ok(e)
+                if e.file_type().is_file()
+                    && e.path().extension().and_then(|e| e.to_str()) == Some("emlx") =>
+            {
+                files.push(e.path().to_path_buf());
+            }
             Err(e) => eprintln!("Warning: {e}"),
             _ => {}
         }
@@ -344,6 +351,13 @@ fn main() {
 
     progress.parsing(total, total); // draw completed bar
     progress.done();
+
+    // Apply sender exclusions. Addresses are already lowercase; normalise the
+    // filter words the same way so the match is case-insensitive.
+    if !args.exclude.is_empty() {
+        let words: Vec<String> = args.exclude.iter().map(|w| w.to_lowercase()).collect();
+        emails.retain(|(_, e)| !words.iter().any(|w| e.from.contains(w.as_str())));
+    }
 
     let report = build_report(&emails, parse_errors, &args.dirs, args.top_n, args.folders);
 

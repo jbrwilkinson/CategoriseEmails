@@ -198,9 +198,10 @@ fn hex_val(b: u8) -> Option<u8> {
 pub fn extract_email_address(s: &str) -> String {
     let s = s.trim();
     if let Some(start) = s.rfind('<')
-        && let Some(end) = s[start..].find('>') {
-            return s[start + 1..start + end].trim().to_lowercase();
-        }
+        && let Some(end) = s[start..].find('>')
+    {
+        return s[start + 1..start + end].trim().to_lowercase();
+    }
     s.to_lowercase()
 }
 
@@ -242,13 +243,14 @@ fn expand_two_digit_year(s: &str) -> String {
     if parts.len() >= 3 {
         let year_str = parts[2];
         if year_str.len() == 2
-            && let Ok(y) = year_str.parse::<u32>() {
-                let full_year = if y < 50 { 2000 + y } else { 1900 + y };
-                return match parts.get(3) {
-                    Some(rest) => format!("{} {} {} {}", parts[0], parts[1], full_year, rest),
-                    None => format!("{} {} {}", parts[0], parts[1], full_year),
-                };
-            }
+            && let Ok(y) = year_str.parse::<u32>()
+        {
+            let full_year = if y < 50 { 2000 + y } else { 1900 + y };
+            return match parts.get(3) {
+                Some(rest) => format!("{} {} {} {}", parts[0], parts[1], full_year, rest),
+                None => format!("{} {} {}", parts[0], parts[1], full_year),
+            };
+        }
     }
     s.to_string()
 }
@@ -326,16 +328,17 @@ fn is_timezone_token(token: &str) -> bool {
     }
     // Alpha-prefixed offset: e.g. GMT-0700
     if let Some(sign_pos) = token.find(['+', '-'])
-        && sign_pos > 0 {
-            let prefix = &token[..sign_pos];
-            let offset = &token[sign_pos..];
-            if prefix.chars().all(|c| c.is_ascii_alphabetic())
-                && offset.len() == 5
-                && offset[1..].bytes().all(|c| c.is_ascii_digit())
-            {
-                return true;
-            }
+        && sign_pos > 0
+    {
+        let prefix = &token[..sign_pos];
+        let offset = &token[sign_pos..];
+        if prefix.chars().all(|c| c.is_ascii_alphabetic())
+            && offset.len() == 5
+            && offset[1..].bytes().all(|c| c.is_ascii_digit())
+        {
+            return true;
         }
+    }
     false
 }
 
@@ -361,16 +364,17 @@ fn normalize_timezone(s: &str) -> String {
     let replacement: Option<&str> = 'find: {
         // Case 1: alpha prefix immediately before ±HHMM, e.g. "GMT-0700".
         if let Some(sign_pos) = token.find(['+', '-'])
-            && sign_pos > 0 {
-                let prefix = &token[..sign_pos];
-                let offset = &token[sign_pos..];
-                if prefix.chars().all(|c| c.is_ascii_alphabetic())
-                    && offset.len() == 5
-                    && offset[1..].chars().all(|c| c.is_ascii_digit())
-                {
-                    break 'find Some(offset);
-                }
+            && sign_pos > 0
+        {
+            let prefix = &token[..sign_pos];
+            let offset = &token[sign_pos..];
+            if prefix.chars().all(|c| c.is_ascii_alphabetic())
+                && offset.len() == 5
+                && offset[1..].chars().all(|c| c.is_ascii_digit())
+            {
+                break 'find Some(offset);
             }
+        }
 
         // Case 2: bare unsigned offset, e.g. "0000" or "0530" — prepend '+'.
         if token.len() == 4 && token.chars().all(|c| c.is_ascii_digit()) {
